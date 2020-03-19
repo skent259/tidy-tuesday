@@ -1,0 +1,273 @@
+---
+title: "Exploration"
+author: "Sean Kent"
+date: "3/18/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(tidyverse)
+library(schrute)
+library(janitor)
+# library(skimr)
+library(lubridate)
+# remotes::install_github("wilkelab/ggtext")
+library(ggtext)
+library(ggrepel)
+```
+
+
+## Pull in data
+
+```{r}
+office_ratings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-03-17/office_ratings.csv')
+
+office_ratings
+```
+
+
+```{r, eval = FALSE}
+skimr::skim(theoffice)
+```
+
+
+
+
+#### Problem: datasets don't match up
+
+- In `theoffice`, multi-part episodes (ones that aired on the same day but had the same title) are combined, but the episode number is incremented two.  
+- In `office_ratings`, most of the multi-part episodes are combined, but the episode number is incremented by only 1.  This is true except in the case of season 6, which strangely splits multi-part episodes in two and thus has separate imdb ratings for each.  
+- Thus, a typical join on episode number and season 
+
+
+**Solution**: 
+
+1. Take the `office_ratings` dataset and combine season 6 episodes manually 
+2. create a temporary copy of `theoffice` that is summarized by season, episode, and episode name
+3. make sure the two datasets line up on a row basis (even though episode numbering will be off)
+4. do a manual join with `cbind`, then `left_join` the information to `theoffice` by the season-episode key
+
+
+```{r}
+# Niagara: Part 1 and Niagara: Part 2 are episodes 4 and 5, need to combine
+niagara <- 
+  office_ratings %>% 
+  filter(season == 6 & episode %in% c(4,5)) %>% 
+  summarize(
+    season = unique(season),
+    episode = min(episode),
+    title = "Niagara: Parts 1 and 2",
+    imdb_rating = mean(imdb_rating),
+    total_votes = mean(total_votes),
+    air_date = unique(air_date)
+  )
+
+# The Delivery: Part 1 and The Delivery: Part 2 are episodes 17 and 18, need to combine
+thedelivery <- 
+  office_ratings %>% 
+  filter(season == 6 & episode %in% c(17,18)) %>% 
+  summarize(
+    season = unique(season),
+    episode = min(episode),
+    title = "The Delivery: Parts 1 and 2",
+    imdb_rating = mean(imdb_rating),
+    total_votes = mean(total_votes),
+    air_date = unique(air_date)
+  )
+
+office_ratings2 <- 
+  office_ratings %>% 
+  filter(!(season == 6 & episode %in% c(4,5,17,18))) %>% 
+  rbind(niagara, 
+        thedelivery) %>% 
+  arrange(season, episode)
+
+
+```
+
+
+
+```{r}
+theoffice_episode_level <-
+  theoffice %>% 
+  select(season, episode, episode_name) %>% 
+  unique()
+
+theoffice_episode_level_imdb <- 
+  cbind(theoffice_episode_level,
+        office_ratings2 %>% select(-season, -episode, -title))
+
+```
+
+```{r}
+theoffice_correct <-
+  theoffice %>% 
+  select(-imdb_rating, -total_votes, -air_date) %>% 
+  left_join(
+    theoffice_episode_level_imdb,
+    by = c("season", "episode")
+  )
+
+saveRDS(theoffice_correct, here::here("2020/2020-03-17/theoffice-data.rds"))
+```
+
+
+
+
+
+## Visualizations
+
+```{r}
+season_begin_end_dates <- theoffice_correct %>% 
+  mutate(air_date = lubridate::as_date(air_date)) %>% 
+  group_by(season) %>% 
+  summarize(start_date = min(air_date),
+            end_date = max(air_date),
+            air_date = mean(air_date),
+            imdb_rating = 5)
+```
+
+
+
+```{r}
+dm_grey <- rgb(182, 180, 181, maxColorValue = 255)
+dm_blue <- "#3274dd"
+
+theoffice_ep_summary <- 
+  theoffice_correct %>% 
+  group_by(season, episode) %>% 
+  summarize(air_date = unique(air_date),
+            imdb_rating = unique(imdb_rating),
+            michael = "Michael" %in% character,
+            director = unique(director),
+            episode_name = unique(episode_name.y)
+            ) %>% 
+  mutate(air_date = lubridate::as_date(air_date))
+```
+
+Build the basic portions of the plot
+
+```{r}
+p <- 
+  theoffice_ep_summary %>% 
+  ggplot(aes(air_date, imdb_rating)) +
+  geom_rect(
+    aes(xmin = start_date, xmax = end_date,
+        ymin = 0, ymax = 10),
+    alpha = 0.3,
+    fill = dm_grey,
+    color = rgb(0,0,0,0),
+    data = season_begin_end_dates
+  ) +
+  geom_point(aes(color = michael)) +
+  geom_text(
+    aes(label = paste0("S", as.numeric(season)), y = 0.5),
+    fontface = "bold", 
+    size = 5,
+    data = season_begin_end_dates
+  ) + 
+  geom_label_repel(
+    aes(label = episode_name),
+    nudge_y = 1,
+    size = 2.8,
+    data = filter(theoffice_ep_summary, imdb_rating > 9.3, season %in% c("07", "09"))
+  ) +
+  scale_x_date(breaks = make_date(year = 2005:2013, month = 6, day = 1),
+               date_labels = "%Y",
+               # limits = c(ymd("2004-09-01"), NA)
+               ) +
+  scale_y_continuous(limits = c(0,10.7), breaks = 0:10, expand = c(0, 0.06)) +
+  scale_color_manual(values = c(dm_blue, "black"))
+```
+
+Add some formatting and labels
+
+```{r, fig.width=8, fig.height=5}
+p <- p +
+  labs(
+    title = glue::glue("How <b style='color:{dm_blue}'>Michael Scott Leaving</b><i> The Office</i> Affected Fan Ratings"),
+    # subtitle = "IMDB Episode Ratings over time",
+    x = NULL,
+    y = "IMDB Rating",
+    caption = "\"Goodbye, Michael\" was the last episode with Michael Scott until \"Finale\".  Data comes from the schrutte R package and IMDB."
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_markdown(lineheight = 1.1),
+    legend.position = "none",
+    panel.grid.major.y = element_line(color = dm_grey, linetype = "dashed"),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+p
+ggsave(here::here("2020/2020-03-17/plot_michael-scott-leaving.pdf"), width = 8, height = 5, dpi = 320)
+```
+
+
+
+## Appendix
+
+### Diagnosing the air_date problem
+
+```{r}
+theoffice %>% 
+  filter(is.na(air_date)) %>%
+  # left_join(office_ratings, by = c("season", "episode")) %>% 
+  select(season, episode, episode_name, air_date) %>%
+  unique()
+```
+
+
+```{r}
+theoffice %>% 
+  # filter(is.na(air_date)) %>% 
+  # left_join(office_ratings, by = c("season", "episode")) %>% 
+  select(season, episode, episode_name, air_date, imdb_rating) %>%
+  unique()
+
+theoffice %>% 
+  filter(season == "04", episode == "03") %>%
+  # left_join(office_ratings, by = c("season", "episode")) %>% 
+  select(season, episode, episode_name, air_date, imdb_rating) %>%
+  unique()
+
+
+```
+
+```{r}
+office_ratings %>% 
+  select(season, episode, title, air_date) %>% 
+  unique()
+```
+
+```{r}
+tabyl(office_ratings, season)
+tabyl(theoffice %>% select(season, episode) %>% unique(), season)
+```
+
+
+```{r}
+office_ratings %>% filter(season == 6)
+```
+
+```{r}
+theoffice %>% select(season, episode, episode_name) %>% filter(season == "06") %>% unique()
+```
+
+
+
+### Other Data Issues:
+
+season 6 episode 24 should be "The Cover-Up", not "The cover"
+
+
+
+
+
